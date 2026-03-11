@@ -1,0 +1,13 @@
+# Google Apps Script 後端程式碼（不屬於網站）
+google_apps_script.js
+
+# Firebase 自動產生
+.firebase/
+firebase-debug.log
+
+# macOS
+.DS_Store
+
+# 編輯器
+.vscode/
+.idea/
