@@ -10,6 +10,8 @@ const CUSTOM_ACTIVE_KEY = "word_tetris_custom_active_v1";
 const CUSTOM_FULL_KEY = "word_tetris_custom_full_v1";
 const SINGLE_WORD_MODE_KEY = "word_tetris_single_word_mode_v1";
 const SPLIT_MODE_KEY = "word_tetris_split_mode_v1"; // "syllable" | "random" | "mixed"
+const WORD_LETTERS_KEY = "word_tetris_word_letters_v1"; // 單字模式字母篩選
+const GROUP4_CATS_KEY = "word_tetris_group4_cats_v1";  // 群組4分類篩選
 
 // 預設群組
 const GROUP_WORDS1 = [
@@ -3657,6 +3659,82 @@ const DEFAULT_WORD_ROWS = [
 ];
 
 
+// ── 字母子群組工具 ──
+
+/** 從 word row 提取德文首字母（去除冠詞，合併 Ä→A, Ö→O, Ü→U） */
+function getGermanFirstLetter(row) {
+  const parts = row.split(",");
+  if (parts.length < 2) return null;
+  let german = parts[1].trim();
+  // 去除常見德文冠詞
+  german = german.replace(/^(der|die|das|den|dem|ein|eine|einen|einem|einer)\s+/i, "");
+  if (!german) return null;
+  let ch = german.charAt(0).toUpperCase();
+  // 合併變母音
+  if (ch === "Ä") ch = "A";
+  if (ch === "Ö") ch = "O";
+  if (ch === "Ü") ch = "U";
+  return /[A-Z]/.test(ch) ? ch : null;
+}
+
+/** 將 DEFAULT_WORD_ROWS 按德文首字母分組 */
+function buildLetterMap() {
+  const map = {};
+  for (const row of DEFAULT_WORD_ROWS) {
+    const parts = row.split(",").map(s => s.trim()).filter(Boolean);
+    if (parts.length !== 2) continue;
+    const letter = getGermanFirstLetter(row);
+    if (!letter) continue;
+    if (!map[letter]) map[letter] = [];
+    map[letter].push(row);
+  }
+  return map;
+}
+
+const _letterMap = buildLetterMap();
+const _lettersSorted = Object.keys(_letterMap).sort();
+
+// ── 群組 4 分類工具 ──
+
+/** 群組 4 的分類定義（按第一欄的前綴判斷） */
+const GROUP4_CATEGORIES = [
+  { id: "masculine", label: "陽性", prefix: "陽性" },
+  { id: "neuter",    label: "中性", prefix: "中性" },
+  { id: "feminine",  label: "陰性", prefix: "陰性" },
+  { id: "plural",    label: "複數", prefix: "複數" },
+];
+
+/** 從群組 4 的 word row 取得分類 id */
+function getGroup4Category(row) {
+  const firstField = row.split(",")[0].trim();
+  for (const cat of GROUP4_CATEGORIES) {
+    if (firstField.startsWith(cat.prefix)) return cat.id;
+  }
+  return null;
+}
+
+/** 載入群組 4 已選的分類集合；null = 全選 */
+function loadGroup4Cats() {
+  try {
+    const raw = localStorage.getItem(GROUP4_CATS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) return new Set(parsed);
+    return null;
+  } catch { return null; }
+}
+
+/** 載入已選的字母集合；null = 全選 */
+function loadActiveLetters() {
+  try {
+    const raw = localStorage.getItem(WORD_LETTERS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) return new Set(parsed);
+    return null;
+  } catch { return null; }
+}
+
 const rowListEl = document.getElementById("rowList");
 const messageEl = document.getElementById("message");
 const newRowInput = document.getElementById("newRowInput");
@@ -3679,6 +3757,8 @@ const singleWordModeBtn = document.getElementById("singleWordModeBtn");
 const lenSection = document.getElementById("lenSection");
 const sourceSection = document.getElementById("sourceSection");
 const singleWordModeHint = document.getElementById("singleWordModeHint");
+const letterSubgroupBar = document.getElementById("letterSubgroupBar");
+const group4CatBar = document.getElementById("group4CatBar");
 const splitModeBar = document.getElementById("splitModeBar");
 const splitModeBtns = splitModeBar ? splitModeBar.querySelectorAll(".split-mode-btn") : [];
 
@@ -3691,6 +3771,8 @@ let activeGroups = loadActiveGroups();    // Set<number>
 let customActive = loadCustomActive();   // boolean
 let singleWordMode = loadSingleWordMode(); // boolean
 let splitMode = loadSplitMode();         // "syllable" | "random" | "mixed"
+let activeLetters = loadActiveLetters();  // Set<string> | null (null = 全選)
+let activeGroup4Cats = loadGroup4Cats();  // Set<string> | null (null = 全選)
 
 // （單字模式關閉後保持 2格+自定義，不需要記憶先前設定）
 
@@ -3829,7 +3911,7 @@ function saveCustomRowsFull() {
 function buildDisplayRows() {
   displayRows = [];
 
-  // 單字模式：強制 2格 + 自定義，只載入 2 欄項目
+  // 單字模式：強制 2格 + 自定義，只載入 2 欄項目，支援字母篩選
   if (singleWordMode) {
     customActive = true;
     activeGroups = new Set();
@@ -3841,6 +3923,11 @@ function buildDisplayRows() {
     for (const w of customRowsFull) {
       const parts = w.split(",").map(s => s.trim()).filter(Boolean);
       if (parts.length !== 2) continue;
+      // 字母篩選
+      if (activeLetters !== null) {
+        const letter = getGermanFirstLetter(w);
+        if (!letter || !activeLetters.has(letter)) continue;
+      }
       displayRows.push({ text: w, source: "custom" });
     }
     return;
@@ -3855,9 +3942,13 @@ function buildDisplayRows() {
     );
     for (const w of GROUP_ALL[gi]) {
       const norm = w.split(",").map(s => s.trim().toLowerCase()).filter(Boolean).join(",");
-      if (!removedSet.has(norm)) {
-        displayRows.push({ text: w, source: "group-" + gi });
+      if (removedSet.has(norm)) continue;
+      // 群組 4 分類篩選
+      if (gi === 3 && activeGroup4Cats !== null) {
+        const cat = getGroup4Category(w);
+        if (cat && !activeGroup4Cats.has(cat)) continue;
       }
+      displayRows.push({ text: w, source: "group-" + gi });
     }
   }
   if (customActive) {
@@ -3986,12 +4077,19 @@ function toggleGroup(idx) {
     activeGroups.delete(idx);
     displayRows = displayRows.filter(r => r.source !== key);
   } else {
-    // 開啟：載入該群組的所有原始 word（完整重載）
+    // 開啟：載入該群組的 word（群組 4 套用分類篩選）
     activeGroups.add(idx);
     for (const w of GROUP_ALL[idx]) {
+      // 群組 4 分類篩選
+      if (idx === 3 && activeGroup4Cats !== null) {
+        const cat = getGroup4Category(w);
+        if (cat && !activeGroup4Cats.has(cat)) continue;
+      }
       displayRows.push({ text: w, source: key });
     }
   }
+  // 群組 4 開啟/關閉時更新分類按鈕
+  updateGroup4CatBarVisibility();
   updateSourceUI();
   renderRows();
 }
@@ -4039,6 +4137,272 @@ function toggleCustom() {
   renderRows();
 }
 
+// ── 群組 4 分類 UI ──
+
+/** 渲染群組 4 分類按鈕 */
+function renderGroup4CatBar() {
+  if (!group4CatBar) return;
+  // 保留第一個 span（標題），移除其餘按鈕
+  const title = group4CatBar.querySelector("span");
+  group4CatBar.innerHTML = "";
+  if (title) group4CatBar.appendChild(title);
+
+  // 「全部」按鈕
+  const allBtn = document.createElement("button");
+  allBtn.type = "button";
+  allBtn.textContent = "全部";
+  allBtn.className = "g4cat-btn";
+  allBtn.dataset.cat = "ALL";
+  allBtn.style.cssText = "padding:8px 14px;font-size:0.85rem;font-weight:700;" +
+    "border:2px solid #666;border-radius:8px;background:#2a2a2a;color:#ccc;" +
+    "cursor:pointer;transition:background 0.15s,box-shadow 0.2s,color 0.15s,border-color 0.15s;";
+  group4CatBar.appendChild(allBtn);
+
+  for (const cat of GROUP4_CATEGORIES) {
+    // 計算該分類有幾個項目
+    const count = GROUP_WORDS4.filter(w => getGroup4Category(w) === cat.id).length;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = `${cat.label} (${count})`;
+    btn.className = "g4cat-btn";
+    btn.dataset.cat = cat.id;
+    btn.style.cssText = "padding:8px 14px;font-size:0.85rem;font-weight:600;" +
+      "border:2px solid #666;border-radius:8px;background:#2a2a2a;color:#ccc;" +
+      "cursor:pointer;transition:background 0.15s,box-shadow 0.2s,color 0.15s,border-color 0.15s;";
+    group4CatBar.appendChild(btn);
+  }
+
+  // 綁定事件
+  group4CatBar.querySelectorAll(".g4cat-btn").forEach(btn => {
+    tapBind(btn, () => toggleGroup4Cat(btn.dataset.cat));
+  });
+
+  updateGroup4CatBarUI();
+}
+
+/** 切換群組 4 分類 */
+function toggleGroup4Cat(catId) {
+  const allCatIds = GROUP4_CATEGORIES.map(c => c.id);
+
+  if (catId === "ALL") {
+    if (activeGroup4Cats === null) {
+      activeGroup4Cats = new Set();
+    } else {
+      activeGroup4Cats = null;
+    }
+  } else {
+    if (activeGroup4Cats === null) {
+      activeGroup4Cats = new Set(allCatIds);
+      activeGroup4Cats.delete(catId);
+    } else if (activeGroup4Cats.has(catId)) {
+      activeGroup4Cats.delete(catId);
+      if (activeGroup4Cats.size === 0) {
+        activeGroup4Cats = null;
+      }
+    } else {
+      activeGroup4Cats.add(catId);
+      if (activeGroup4Cats.size >= allCatIds.length) {
+        activeGroup4Cats = null;
+      }
+    }
+  }
+
+  // 重建群組 4 的 displayRows
+  rebuildGroup4Display();
+  updateGroup4CatBarUI();
+  renderRows();
+
+  const count = displayRows.filter(r => r.source === "group-3").length;
+  if (activeGroup4Cats === null) {
+    setMessage(`群組 4：全部分類（共 ${count} 組），按「儲存」生效。`, true);
+  } else {
+    const catLabels = GROUP4_CATEGORIES
+      .filter(c => activeGroup4Cats.has(c.id))
+      .map(c => c.label)
+      .join("、");
+    setMessage(`群組 4：${catLabels}（共 ${count} 組），按「儲存」生效。`, true);
+  }
+}
+
+/** 更新群組 4 分類按鈕的發光狀態 */
+function updateGroup4CatBarUI() {
+  if (!group4CatBar) return;
+  group4CatBar.querySelectorAll(".g4cat-btn").forEach(btn => {
+    const catId = btn.dataset.cat;
+    let isActive;
+    if (catId === "ALL") {
+      isActive = activeGroup4Cats === null;
+    } else {
+      isActive = activeGroup4Cats === null || activeGroup4Cats.has(catId);
+    }
+    if (isActive) {
+      btn.style.background = "#42a5f5";
+      btn.style.color = "#fff";
+      btn.style.borderColor = "#1976d2";
+      btn.style.boxShadow = "0 0 8px 2px rgba(66,165,245,0.4)";
+    } else {
+      btn.style.background = "#2a2a2a";
+      btn.style.color = "#666";
+      btn.style.borderColor = "#444";
+      btn.style.boxShadow = "none";
+    }
+  });
+}
+
+/** 重建群組 4 在 displayRows 中的項目（分類篩選變動時呼叫） */
+function rebuildGroup4Display() {
+  if (!activeGroups.has(3)) return;
+  // 移除舊的群組 4 項目
+  displayRows = displayRows.filter(r => r.source !== "group-3");
+  // 重新載入（套用分類篩選）
+  const removed = loadGroupRemoved();
+  const removedSet = new Set(
+    (removed[3] || []).map(s => s.split(",").map(p => p.trim().toLowerCase()).filter(Boolean).join(","))
+  );
+  for (const w of GROUP_ALL[3]) {
+    const norm = w.split(",").map(s => s.trim().toLowerCase()).filter(Boolean).join(",");
+    if (removedSet.has(norm)) continue;
+    if (activeGroup4Cats !== null) {
+      const cat = getGroup4Category(w);
+      if (cat && !activeGroup4Cats.has(cat)) continue;
+    }
+    displayRows.push({ text: w, source: "group-3" });
+  }
+  updateTotalCount();
+}
+
+/** 根據群組 4 是否啟用來顯示/隱藏分類按鈕列 */
+function updateGroup4CatBarVisibility() {
+  if (!group4CatBar) return;
+  const show = activeGroups.has(3);
+  group4CatBar.style.display = show ? "flex" : "none";
+  if (show && group4CatBar.querySelectorAll(".g4cat-btn").length === 0) {
+    renderGroup4CatBar();
+  }
+}
+
+// ── 字母子群組 UI ──
+
+/** 渲染字母篩選按鈕列 */
+function renderLetterBar() {
+  if (!letterSubgroupBar) return;
+  letterSubgroupBar.innerHTML = "";
+
+  // 「全選」按鈕
+  const allBtn = document.createElement("button");
+  allBtn.type = "button";
+  allBtn.textContent = "全部";
+  allBtn.className = "letter-btn";
+  allBtn.dataset.letter = "ALL";
+  allBtn.style.cssText = "padding:7px 10px;font-size:0.82rem;font-weight:700;" +
+    "border:2px solid #666;border-radius:8px;background:#2a2a2a;color:#ccc;" +
+    "cursor:pointer;transition:background 0.15s,box-shadow 0.2s,color 0.15s,border-color 0.15s;min-width:48px;";
+  letterSubgroupBar.appendChild(allBtn);
+
+  for (const letter of _lettersSorted) {
+    const count = _letterMap[letter].length;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = letter + "\u2009" + count;
+    btn.className = "letter-btn";
+    btn.dataset.letter = letter;
+    btn.style.cssText = "padding:7px 6px;font-size:0.78rem;font-weight:600;" +
+      "border:2px solid #666;border-radius:8px;background:#2a2a2a;color:#ccc;" +
+      "cursor:pointer;transition:background 0.15s,box-shadow 0.2s,color 0.15s,border-color 0.15s;min-width:40px;";
+    letterSubgroupBar.appendChild(btn);
+  }
+
+  // 綁定事件
+  letterSubgroupBar.querySelectorAll(".letter-btn").forEach(btn => {
+    tapBind(btn, () => toggleLetter(btn.dataset.letter));
+  });
+
+  updateLetterBarUI();
+}
+
+/** 切換字母選取 */
+function toggleLetter(letter) {
+  if (letter === "ALL") {
+    if (activeLetters === null) {
+      activeLetters = new Set(); // 全部取消
+    } else {
+      activeLetters = null; // 全選
+    }
+  } else {
+    if (activeLetters === null) {
+      // 原本全選 → 取消這個字母（= 選其他所有字母）
+      activeLetters = new Set(_lettersSorted);
+      activeLetters.delete(letter);
+    } else if (activeLetters.has(letter)) {
+      activeLetters.delete(letter);
+      // 不允許一個都不選 → 自動變回全選
+      if (activeLetters.size === 0) {
+        activeLetters = null;
+      }
+    } else {
+      activeLetters.add(letter);
+      // 如果全部選了 → 用 null 表示全選
+      if (activeLetters.size >= _lettersSorted.length) {
+        activeLetters = null;
+      }
+    }
+  }
+
+  // 重建 displayRows
+  rebuildSingleWordDisplay();
+  updateLetterBarUI();
+  renderRows();
+
+  const count = displayRows.filter(r => r.source === "custom").length;
+  if (activeLetters === null) {
+    setMessage(`已選取全部字母（共 ${count} 組），按「儲存」生效。`, true);
+  } else {
+    const letters = [...activeLetters].sort().join(", ");
+    setMessage(`已篩選 ${letters}（共 ${count} 組），按「儲存」生效。`, true);
+  }
+}
+
+/** 更新字母按鈕的發光狀態 */
+function updateLetterBarUI() {
+  if (!letterSubgroupBar) return;
+  letterSubgroupBar.querySelectorAll(".letter-btn").forEach(btn => {
+    const letter = btn.dataset.letter;
+    let isActive;
+    if (letter === "ALL") {
+      isActive = activeLetters === null;
+    } else {
+      isActive = activeLetters === null || activeLetters.has(letter);
+    }
+    if (isActive) {
+      btn.style.background = "#4caf50";
+      btn.style.color = "#fff";
+      btn.style.borderColor = "#388e3c";
+      btn.style.boxShadow = "0 0 8px 2px rgba(76,175,80,0.4)";
+    } else {
+      btn.style.background = "#2a2a2a";
+      btn.style.color = "#666";
+      btn.style.borderColor = "#444";
+      btn.style.boxShadow = "none";
+    }
+  });
+}
+
+/** 重建單字模式的 displayRows（字母篩選變動時呼叫） */
+function rebuildSingleWordDisplay() {
+  if (!singleWordMode) return;
+  displayRows = [];
+  for (const w of customRowsFull) {
+    const parts = w.split(",").map(s => s.trim()).filter(Boolean);
+    if (parts.length !== 2) continue;
+    if (activeLetters !== null) {
+      const letter = getGermanFirstLetter(w);
+      if (!letter || !activeLetters.has(letter)) continue;
+    }
+    displayRows.push({ text: w, source: "custom" });
+  }
+  updateTotalCount();
+}
+
 /** 單字模式：一鍵套用「自定義 + 只顯示2欄項目 + 德文拆字」 */
 function toggleSingleWordMode() {
   // 切換前：先把手動移除同步回 customRowsFull
@@ -4061,15 +4425,26 @@ function toggleSingleWordMode() {
       // 單字模式：只保留 2 欄項目（中文提示 + 德文單字）
       const parts = w.split(",").map(s => s.trim()).filter(Boolean);
       if (parts.length !== 2) continue;
+      // 字母篩選
+      if (activeLetters !== null) {
+        const letter = getGermanFirstLetter(w);
+        if (!letter || !activeLetters.has(letter)) continue;
+      }
     }
     displayRows.push({ text: w, source: "custom" });
+  }
+
+  // 渲染字母篩選按鈕（開啟時建立，關閉時隱藏）
+  if (singleWordMode) {
+    renderLetterBar();
   }
 
   updateSourceUI();
   renderRows();
   if (singleWordMode) {
     const count = displayRows.filter(r => r.source === "custom").length;
-    setMessage(`✅ 單字模式已開啟：找到 ${count} 組「中文＋德文單字」，德文將自動拆成字母方塊。按「儲存」生效。`, true);
+    const letterInfo = activeLetters === null ? "全部字母" : [...activeLetters].sort().join(", ");
+    setMessage(`✅ 單字模式已開啟：找到 ${count} 組「中文＋德文單字」（${letterInfo}），德文將自動拆成字母方塊。按「儲存」生效。`, true);
   } else {
     const count = displayRows.length;
     setMessage(`🔤 單字模式已關閉，保留自定義（${count} 組）+ 2格設定。`, true);
@@ -4101,6 +4476,15 @@ function updateSourceUI() {
   }
   // 提示文字
   if (singleWordModeHint) singleWordModeHint.style.display = singleWordMode ? "" : "none";
+
+  // ── 字母篩選列 ──
+  if (letterSubgroupBar) {
+    letterSubgroupBar.style.display = singleWordMode ? "flex" : "none";
+    if (singleWordMode) updateLetterBarUI();
+  }
+
+  // ── 群組 4 分類篩選列 ──
+  updateGroup4CatBarVisibility();
 
   // ── 單字模式 → 反灰「允許的組合長度」和「單字來源」 ──
   if (lenSection) {
@@ -4195,9 +4579,8 @@ function saveRows() {
   // 從 displayRows 提取目前的自定義 word（可能已被移除部分）
   if (customActive) {
     if (singleWordMode) {
-      // 單字模式下 displayRows 只有 2 欄項目，不能覆蓋完整列表
-      // 保留 customRowsFull 作為完整資料，customRows 同步
-      customRows = [...customRowsFull];
+      // 單字模式：儲存字母篩選後的結果（displayRows 已經過字母篩選）
+      customRows = displayRows.filter(r => r.source === "custom").map(r => r.text);
     } else {
       customRows = displayRows.filter(r => r.source === "custom").map(r => r.text);
     }
@@ -4233,7 +4616,29 @@ function saveRows() {
   localStorage.setItem(CUSTOM_ACTIVE_KEY, customActive ? "1" : "0");
   localStorage.setItem(SINGLE_WORD_MODE_KEY, singleWordMode ? "1" : "0");
   localStorage.setItem(SPLIT_MODE_KEY, splitMode);
-  localStorage.setItem(GROUP_DATA_KEY, JSON.stringify(GROUP_ALL));
+  // 儲存群組資料（群組 4 套用分類篩選後存入）
+  const groupDataToSave = GROUP_ALL.map((group, idx) => {
+    if (idx === 3 && activeGroup4Cats !== null) {
+      return group.filter(w => {
+        const cat = getGroup4Category(w);
+        return !cat || activeGroup4Cats.has(cat);
+      });
+    }
+    return group;
+  });
+  localStorage.setItem(GROUP_DATA_KEY, JSON.stringify(groupDataToSave));
+  // 儲存字母篩選
+  if (activeLetters === null) {
+    localStorage.removeItem(WORD_LETTERS_KEY);
+  } else {
+    localStorage.setItem(WORD_LETTERS_KEY, JSON.stringify([...activeLetters]));
+  }
+  // 儲存群組 4 分類篩選
+  if (activeGroup4Cats === null) {
+    localStorage.removeItem(GROUP4_CATS_KEY);
+  } else {
+    localStorage.setItem(GROUP4_CATS_KEY, JSON.stringify([...activeGroup4Cats]));
+  }
   // 若有手動移除的群組 word，儲存到 GROUP_REMOVED_KEY；否則清除
   if (Object.keys(manualRemoved).length > 0) {
     localStorage.setItem(GROUP_REMOVED_KEY, JSON.stringify(manualRemoved));
@@ -4253,7 +4658,9 @@ function saveRows() {
     if (singleWordMode) {
       const splitLabel = splitMode === "syllable" ? "音節拆分" :
                          splitMode === "random" ? "隨機拆分" : "混合拆分";
-      parts.push(`單字模式（${customCount} 組，${splitLabel}）`);
+      const letterLabel = activeLetters === null ? "全部字母" :
+                          [...activeLetters].sort().join("");
+      parts.push(`單字模式（${letterLabel}，${customCount} 組，${splitLabel}）`);
     } else {
       parts.push(`自定義（${customCount} 組）`);
     }
@@ -4274,6 +4681,8 @@ function resetDefault() {
   customActive = false;
   singleWordMode = false;
   splitMode = "syllable";
+  activeLetters = null;
+  activeGroup4Cats = null;
   pickCount = 0;
   pickCountInput.value = 0;
   autoRemoveToggle.checked = false;
@@ -4304,6 +4713,8 @@ function resetDefault() {
   localStorage.setItem(SPLIT_MODE_KEY, "syllable");
   localStorage.setItem(GROUP_DATA_KEY, JSON.stringify(GROUP_ALL));
   localStorage.removeItem(GROUP_REMOVED_KEY);                   // 清除手動移除紀錄
+  localStorage.removeItem(WORD_LETTERS_KEY);                    // 清除字母篩選
+  localStorage.removeItem(GROUP4_CATS_KEY);                     // 清除群組4分類篩選
 
   setMessage("✅ 已還原預設並自動儲存，回遊戲頁即可套用。", true);
 }
@@ -4896,6 +5307,14 @@ len5Toggle.checked = _savedLens.includes(5);
 
 // 根據已存的狀態建立 displayRows
 buildDisplayRows();
+// 若單字模式已開啟，初始化字母篩選按鈕
+if (singleWordMode) {
+  renderLetterBar();
+}
+// 若群組 4 已開啟，初始化分類篩選按鈕
+if (activeGroups.has(3)) {
+  renderGroup4CatBar();
+}
 updateSourceUI();
 renderRows();
 
